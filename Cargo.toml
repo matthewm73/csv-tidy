@@ -1,0 +1,6 @@
+[package]
+name = "csvtidy"
+version = "0.1.0"
+edition = "2021"
+description = "A validating CSV parser and pretty printer with a --json output mode"
+license = "MIT"
