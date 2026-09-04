@@ -63,10 +63,10 @@ pub struct ParsedTable {
 }
 
 /// Tokenize raw CSV text into records, honoring RFC 4180 quoting: fields
-/// may be wrapped in double quotes, a doubled quote ("") inside a quoted
-/// field is a literal quote, and quoted fields may contain commas and
-/// newlines.
-fn tokenize(input: &str) -> Result<Vec<Record>, ParseError> {
+/// may be wrapped in `quote`, a doubled quote character inside a quoted
+/// field is a literal instance of it, and quoted fields may contain the
+/// delimiter and newlines.
+fn tokenize(input: &str, delimiter: char, quote: char) -> Result<Vec<Record>, ParseError> {
     enum State {
         FieldStart,
         Unquoted,
@@ -87,8 +87,8 @@ fn tokenize(input: &str) -> Result<Vec<Record>, ParseError> {
     while let Some(c) = chars.next() {
         match state {
             State::FieldStart => match c {
-                '"' => state = State::Quoted,
-                ',' => {
+                q if q == quote => state = State::Quoted,
+                d if d == delimiter => {
                     record_fields.push(std::mem::take(&mut field));
                 }
                 '\n' => {
@@ -114,7 +114,7 @@ fn tokenize(input: &str) -> Result<Vec<Record>, ParseError> {
                 }
             },
             State::Unquoted => match c {
-                ',' => {
+                d if d == delimiter => {
                     record_fields.push(std::mem::take(&mut field));
                     state = State::FieldStart;
                 }
@@ -137,7 +137,7 @@ fn tokenize(input: &str) -> Result<Vec<Record>, ParseError> {
                     col = 0;
                     record_start_line = line;
                 }
-                '"' => {
+                q if q == quote => {
                     return Err(ParseError {
                         line,
                         column: col,
@@ -147,10 +147,10 @@ fn tokenize(input: &str) -> Result<Vec<Record>, ParseError> {
                 other => field.push(other),
             },
             State::Quoted => {
-                if c == '"' {
-                    if chars.peek() == Some(&'"') {
+                if c == quote {
+                    if chars.peek() == Some(&quote) {
                         chars.next();
-                        field.push('"');
+                        field.push(quote);
                     } else {
                         state = State::AfterQuote;
                     }
@@ -163,7 +163,7 @@ fn tokenize(input: &str) -> Result<Vec<Record>, ParseError> {
                 }
             }
             State::AfterQuote => match c {
-                ',' => {
+                d if d == delimiter => {
                     record_fields.push(std::mem::take(&mut field));
                     state = State::FieldStart;
                 }
@@ -226,8 +226,17 @@ fn tokenize(input: &str) -> Result<Vec<Record>, ParseError> {
 /// the first record). All ragged rows are collected and reported together
 /// rather than stopping at the first one, since that's more useful when
 /// cleaning up a real file with several bad rows.
-pub fn parse(input: &str, has_header: bool) -> Result<ParsedTable, Vec<CsvError>> {
-    let records = tokenize(input).map_err(|e| vec![CsvError::Parse(e)])?;
+///
+/// `delimiter` and `quote` must be distinct characters, and neither may be
+/// `\r` or `\n`; the caller is expected to have checked this already since
+/// those come from command-line input.
+pub fn parse(
+    input: &str,
+    has_header: bool,
+    delimiter: char,
+    quote: char,
+) -> Result<ParsedTable, Vec<CsvError>> {
+    let records = tokenize(input, delimiter, quote).map_err(|e| vec![CsvError::Parse(e)])?;
 
     if records.is_empty() {
         return Ok(ParsedTable { header: None, rows: Vec::new() });
@@ -271,7 +280,7 @@ mod tests {
 
     #[test]
     fn parses_simple_rows() {
-        let table = parse("a,b\n1,2\n3,4\n", true).unwrap();
+        let table = parse("a,b\n1,2\n3,4\n", true, ',', '"').unwrap();
         assert_eq!(table.header, Some(vec!["a".to_string(), "b".to_string()]));
         assert_eq!(table.rows.len(), 2);
         assert_eq!(table.rows[0].fields, vec!["1".to_string(), "2".to_string()]);
@@ -279,14 +288,14 @@ mod tests {
 
     #[test]
     fn handles_quoted_commas_and_escaped_quotes() {
-        let table = parse("name,note\n\"Doe, Jane\",\"she said \"\"hi\"\"\"\n", true).unwrap();
+        let table = parse("name,note\n\"Doe, Jane\",\"she said \"\"hi\"\"\"\n", true, ',', '"').unwrap();
         assert_eq!(table.rows[0].fields[0], "Doe, Jane");
         assert_eq!(table.rows[0].fields[1], "she said \"hi\"");
     }
 
     #[test]
     fn rejects_ragged_rows() {
-        let result = parse("a,b,c\n1,2\n", true);
+        let result = parse("a,b,c\n1,2\n", true, ',', '"');
         assert!(result.is_err());
         let errors = result.unwrap_err();
         assert_eq!(errors.len(), 1);
@@ -301,7 +310,21 @@ mod tests {
 
     #[test]
     fn rejects_unterminated_quote() {
-        let result = parse("a,b\n\"unterminated,2\n", true);
+        let result = parse("a,b\n\"unterminated,2\n", true, ',', '"');
         assert!(matches!(result, Err(errors) if matches!(errors[0], CsvError::Parse(_))));
+    }
+
+    #[test]
+    fn supports_tab_delimiter() {
+        let table = parse("a\tb\n1\t2\n", true, '\t', '"').unwrap();
+        assert_eq!(table.header, Some(vec!["a".to_string(), "b".to_string()]));
+        assert_eq!(table.rows[0].fields, vec!["1".to_string(), "2".to_string()]);
+    }
+
+    #[test]
+    fn supports_semicolon_delimiter_and_single_quote() {
+        let table = parse("name;note\n'Doe; Jane';'she said ''hi'''\n", true, ';', '\'').unwrap();
+        assert_eq!(table.rows[0].fields[0], "Doe; Jane");
+        assert_eq!(table.rows[0].fields[1], "she said 'hi'");
     }
 }

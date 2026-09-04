@@ -10,20 +10,42 @@ struct Args {
     path: Option<String>,
     json: bool,
     has_header: bool,
+    delimiter: char,
+    quote: char,
 }
 
 fn parse_args(raw: &[String]) -> Result<Args, String> {
     let mut path = None;
     let mut json = false;
     let mut has_header = true;
+    let mut delimiter = ',';
+    let mut quote = '"';
 
-    for arg in raw {
-        match arg.as_str() {
+    let mut i = 0;
+    while i < raw.len() {
+        let arg = raw[i].as_str();
+        match arg {
             "--json" => json = true,
             "--no-header" => has_header = false,
             "-h" | "--help" => {
                 print_help();
                 std::process::exit(0);
+            }
+            "--delimiter" => {
+                i += 1;
+                let val = raw.get(i).ok_or("--delimiter requires a value")?;
+                delimiter = parse_char_flag(val, "--delimiter")?;
+            }
+            "--quote" => {
+                i += 1;
+                let val = raw.get(i).ok_or("--quote requires a value")?;
+                quote = parse_char_flag(val, "--quote")?;
+            }
+            other if other.starts_with("--delimiter=") => {
+                delimiter = parse_char_flag(&other["--delimiter=".len()..], "--delimiter")?;
+            }
+            other if other.starts_with("--quote=") => {
+                quote = parse_char_flag(&other["--quote=".len()..], "--quote")?;
             }
             other if other.starts_with('-') && other != "-" => {
                 return Err(format!("unknown flag: {other}"));
@@ -35,9 +57,38 @@ fn parse_args(raw: &[String]) -> Result<Args, String> {
                 path = Some(other.to_string());
             }
         }
+        i += 1;
     }
 
-    Ok(Args { path, json, has_header })
+    if delimiter == quote {
+        return Err("--delimiter and --quote must be different characters".to_string());
+    }
+
+    Ok(Args { path, json, has_header, delimiter, quote })
+}
+
+/// Parse a single-character flag value. `\t` is accepted as a shorthand for
+/// a literal tab, since typing an actual tab on a command line is awkward.
+fn parse_char_flag(val: &str, flag: &str) -> Result<char, String> {
+    let c = match val {
+        "\\t" => '\t',
+        _ => {
+            let mut chars = val.chars();
+            let c = chars
+                .next()
+                .ok_or_else(|| format!("{flag} requires a single character"))?;
+            if chars.next().is_some() {
+                return Err(format!("{flag} must be a single character"));
+            }
+            c
+        }
+    };
+
+    if c == '\n' || c == '\r' {
+        return Err(format!("{flag} cannot be a newline character"));
+    }
+
+    Ok(c)
 }
 
 fn print_help() {
@@ -46,9 +97,11 @@ fn print_help() {
     println!("    csvtidy [OPTIONS] [FILE]\n");
     println!("If FILE is omitted or is \"-\", input is read from stdin.\n");
     println!("OPTIONS:");
-    println!("    --json         emit machine-readable JSON instead of a table");
-    println!("    --no-header    treat every row as data (no header row)");
-    println!("    -h, --help     show this help text");
+    println!("    --json              emit machine-readable JSON instead of a table");
+    println!("    --no-header         treat every row as data (no header row)");
+    println!("    --delimiter <CHAR>  field delimiter (default: ,); use \\t for tab");
+    println!("    --quote <CHAR>      quote character (default: \")");
+    println!("    -h, --help          show this help text");
 }
 
 fn read_input(path: &Option<String>) -> io::Result<String> {
@@ -81,7 +134,7 @@ fn main() -> ExitCode {
         }
     };
 
-    match parser::parse(&input, args.has_header) {
+    match parser::parse(&input, args.has_header, args.delimiter, args.quote) {
         Ok(table) => {
             if args.json {
                 println!("{}", printer::print_json(&table));

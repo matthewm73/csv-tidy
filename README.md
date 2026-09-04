@@ -30,10 +30,17 @@ If `FILE` is omitted, or is `-`, input is read from stdin.
 
 ```
 OPTIONS:
-    --json         emit machine-readable JSON instead of a table
-    --no-header    treat every row as data (no header row)
-    -h, --help     show help text
+    --json              emit machine-readable JSON instead of a table
+    --no-header         treat every row as data (no header row)
+    --delimiter <CHAR>  field delimiter (default: ,); use \t for tab
+    --quote <CHAR>      quote character (default: ")
+    -h, --help          show help text
 ```
+
+`--delimiter` and `--quote` each take a single character (`--delimiter ;`
+or `--delimiter=;`), and must not match each other. This is enough to
+handle tab-separated files (`--delimiter '\t'`) or files that use a
+single quote instead of a double quote.
 
 ### Example
 
@@ -93,6 +100,7 @@ input, not paper over it.
 ## Status
 
 Early skeleton: the tokenizer, validator, table printer, and JSON printer
-all work end to end, but there's no delimiter option, no streaming for
-very large files, and error messages could use more context. See the
-roadmap for what's next.
+all work end to end, and the delimiter and quote character are
+configurable, but there's no streaming for very large files, no way to
+write validated CSV back out, and error messages could use more context.
+See the roadmap for what's next.
