@@ -34,6 +34,7 @@ OPTIONS:
     --no-header         treat every row as data (no header row)
     --delimiter <CHAR>  field delimiter (default: ,); use \t for tab
     --quote <CHAR>      quote character (default: ")
+    --write <FILE>      re-serialize validated input and write it to FILE
     -h, --help          show help text
 ```
 
@@ -88,6 +89,21 @@ $ csvtidy --json bad.csv
 {"valid":false,"errors":["line 3: expected 3 column(s), found 2"]}
 ```
 
+### Writing validated CSV back out
+
+`--write` re-serializes the parsed table and writes it to a file, using
+whatever delimiter and quote character were given for parsing. Fields are
+only quoted if they need to be, so a file with no odd characters in it
+round-trips byte-for-byte (aside from normalizing line endings to `\n`
+and dropping trailing blank lines).
+
+```
+$ csvtidy --write clean.csv messy.csv
+csvtidy: wrote 2 row(s) to clean.csv
+```
+
+If the input fails validation, nothing is written.
+
 ## Quoting rules
 
 Fields follow RFC 4180: wrap a field in double quotes to let it contain
@@ -99,8 +115,7 @@ input, not paper over it.
 
 ## Status
 
-Early skeleton: the tokenizer, validator, table printer, and JSON printer
-all work end to end, and the delimiter and quote character are
-configurable, but there's no streaming for very large files, no way to
-write validated CSV back out, and error messages could use more context.
-See the roadmap for what's next.
+Early skeleton: the tokenizer, validator, table printer, JSON printer, and
+CSV writer all work end to end, and the delimiter and quote character are
+configurable, but there's no streaming for very large files yet and error
+messages could use more context. See the roadmap for what's next.

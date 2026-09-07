@@ -1,5 +1,6 @@
 mod parser;
 mod printer;
+mod writer;
 
 use std::env;
 use std::fs;
@@ -12,6 +13,7 @@ struct Args {
     has_header: bool,
     delimiter: char,
     quote: char,
+    write: Option<String>,
 }
 
 fn parse_args(raw: &[String]) -> Result<Args, String> {
@@ -20,6 +22,7 @@ fn parse_args(raw: &[String]) -> Result<Args, String> {
     let mut has_header = true;
     let mut delimiter = ',';
     let mut quote = '"';
+    let mut write = None;
 
     let mut i = 0;
     while i < raw.len() {
@@ -41,11 +44,19 @@ fn parse_args(raw: &[String]) -> Result<Args, String> {
                 let val = raw.get(i).ok_or("--quote requires a value")?;
                 quote = parse_char_flag(val, "--quote")?;
             }
+            "--write" => {
+                i += 1;
+                let val = raw.get(i).ok_or("--write requires a file path")?;
+                write = Some(val.clone());
+            }
             other if other.starts_with("--delimiter=") => {
                 delimiter = parse_char_flag(&other["--delimiter=".len()..], "--delimiter")?;
             }
             other if other.starts_with("--quote=") => {
                 quote = parse_char_flag(&other["--quote=".len()..], "--quote")?;
+            }
+            other if other.starts_with("--write=") => {
+                write = Some(other["--write=".len()..].to_string());
             }
             other if other.starts_with('-') && other != "-" => {
                 return Err(format!("unknown flag: {other}"));
@@ -64,7 +75,7 @@ fn parse_args(raw: &[String]) -> Result<Args, String> {
         return Err("--delimiter and --quote must be different characters".to_string());
     }
 
-    Ok(Args { path, json, has_header, delimiter, quote })
+    Ok(Args { path, json, has_header, delimiter, quote, write })
 }
 
 /// Parse a single-character flag value. `\t` is accepted as a shorthand for
@@ -101,6 +112,7 @@ fn print_help() {
     println!("    --no-header         treat every row as data (no header row)");
     println!("    --delimiter <CHAR>  field delimiter (default: ,); use \\t for tab");
     println!("    --quote <CHAR>      quote character (default: \")");
+    println!("    --write <FILE>      re-serialize validated input and write it to FILE");
     println!("    -h, --help          show this help text");
 }
 
@@ -136,7 +148,14 @@ fn main() -> ExitCode {
 
     match parser::parse(&input, args.has_header, args.delimiter, args.quote) {
         Ok(table) => {
-            if args.json {
+            if let Some(dest) = &args.write {
+                let serialized = writer::write_csv(&table, args.delimiter, args.quote);
+                if let Err(e) = fs::write(dest, serialized) {
+                    eprintln!("csvtidy: could not write {dest}: {e}");
+                    return ExitCode::from(1);
+                }
+                println!("csvtidy: wrote {} row(s) to {dest}", table.rows.len());
+            } else if args.json {
                 println!("{}", printer::print_json(&table));
             } else {
                 print!("{}", printer::print_human(&table));
