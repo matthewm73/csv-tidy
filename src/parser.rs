@@ -21,16 +21,25 @@ impl std::fmt::Display for ParseError {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ValidationError {
     pub line: usize,
+    /// 1-based index of the first field where this row diverges from the
+    /// expected column count: the first missing field if the row is short,
+    /// or the first unexpected one if it's long.
+    pub column: usize,
     pub expected_columns: usize,
     pub found_columns: usize,
 }
 
 impl std::fmt::Display for ValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let detail = if self.found_columns < self.expected_columns {
+            format!("missing {} field(s)", self.expected_columns - self.found_columns)
+        } else {
+            format!("{} unexpected field(s)", self.found_columns - self.expected_columns)
+        };
         write!(
             f,
-            "line {}: expected {} column(s), found {}",
-            self.line, self.expected_columns, self.found_columns
+            "line {}, column {}: expected {} column(s), found {} ({detail} starting here)",
+            self.line, self.column, self.expected_columns, self.found_columns
         )
     }
 }
@@ -261,6 +270,7 @@ pub fn parse(
         .map(|r| {
             CsvError::Ragged(ValidationError {
                 line: r.line,
+                column: r.fields.len().min(expected) + 1,
                 expected_columns: expected,
                 found_columns: r.fields.len(),
             })
@@ -294,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_ragged_rows() {
+    fn rejects_ragged_rows_missing_fields() {
         let result = parse("a,b,c\n1,2\n", true, ',', '"');
         assert!(result.is_err());
         let errors = result.unwrap_err();
@@ -303,6 +313,30 @@ mod tests {
             CsvError::Ragged(e) => {
                 assert_eq!(e.expected_columns, 3);
                 assert_eq!(e.found_columns, 2);
+                assert_eq!(e.column, 3);
+                assert_eq!(
+                    e.to_string(),
+                    "line 2, column 3: expected 3 column(s), found 2 (missing 1 field(s) starting here)"
+                );
+            }
+            other => panic!("expected a ragged-row error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_ragged_rows_extra_fields() {
+        let result = parse("a,b\n1,2,3\n", true, ',', '"');
+        let errors = result.unwrap_err();
+        assert_eq!(errors.len(), 1);
+        match &errors[0] {
+            CsvError::Ragged(e) => {
+                assert_eq!(e.expected_columns, 2);
+                assert_eq!(e.found_columns, 3);
+                assert_eq!(e.column, 3);
+                assert_eq!(
+                    e.to_string(),
+                    "line 2, column 3: expected 2 column(s), found 3 (1 unexpected field(s) starting here)"
+                );
             }
             other => panic!("expected a ragged-row error, got {other:?}"),
         }

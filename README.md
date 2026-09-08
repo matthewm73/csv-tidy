@@ -83,10 +83,10 @@ Marco Diaz,Toledo
 ```
 $ csvtidy bad.csv
 csvtidy: input failed validation:
-  line 3: expected 3 column(s), found 2
+  line 3, column 3: expected 3 column(s), found 2 (missing 1 field(s) starting here)
 
 $ csvtidy --json bad.csv
-{"valid":false,"errors":["line 3: expected 3 column(s), found 2"]}
+{"valid":false,"errors":["line 3, column 3: expected 3 column(s), found 2 (missing 1 field(s) starting here)"]}
 ```
 
 ### Writing validated CSV back out
@@ -117,5 +117,7 @@ input, not paper over it.
 
 Early skeleton: the tokenizer, validator, table printer, JSON printer, and
 CSV writer all work end to end, and the delimiter and quote character are
-configurable, but there's no streaming for very large files yet and error
-messages could use more context. See the roadmap for what's next.
+configurable. Ragged-row errors now point at the first field where the row
+diverges from the expected column count, in addition to the line. There's
+still no streaming for very large files, and parse errors (bad quoting)
+don't yet say which field they occurred in. See the roadmap for what's next.
