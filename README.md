@@ -117,7 +117,6 @@ input, not paper over it.
 
 Early skeleton: the tokenizer, validator, table printer, JSON printer, and
 CSV writer all work end to end, and the delimiter and quote character are
-configurable. Ragged-row errors now point at the first field where the row
-diverges from the expected column count, in addition to the line. There's
-still no streaming for very large files, and parse errors (bad quoting)
-don't yet say which field they occurred in. See the roadmap for what's next.
+configurable. Both ragged-row and quoting errors now point at the field
+where the problem was found, in addition to the line. There's still no
+streaming for very large files. See the roadmap for what's next.

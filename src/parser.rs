@@ -4,10 +4,15 @@
 //! bare quote in the middle of an unquoted field, or stray text after a
 //! closing quote, is treated as an error rather than silently absorbed.
 //! The point of this tool is to catch malformed CSV, not paper over it.
+//! Both `ParseError` and `ValidationError` report a 1-based `column`, so
+//! either kind of failure points at the same line/column coordinate.
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParseError {
     pub line: usize,
+    /// 1-based index of the field being parsed when the error occurred,
+    /// mirroring `ValidationError::column` so both error kinds point at
+    /// the same "line, column" coordinate a spreadsheet user would use.
     pub column: usize,
     pub message: String,
 }
@@ -89,7 +94,6 @@ fn tokenize(input: &str, delimiter: char, quote: char) -> Result<Vec<Record>, Pa
     let mut field = String::new();
     let mut state = State::FieldStart;
     let mut line = 1usize;
-    let mut col = 1usize;
 
     let mut chars = input.chars().peekable();
 
@@ -104,7 +108,6 @@ fn tokenize(input: &str, delimiter: char, quote: char) -> Result<Vec<Record>, Pa
                     record_fields.push(std::mem::take(&mut field));
                     records.push(Record { line: record_start_line, fields: std::mem::take(&mut record_fields) });
                     line += 1;
-                    col = 0;
                     record_start_line = line;
                 }
                 '\r' => {
@@ -114,7 +117,6 @@ fn tokenize(input: &str, delimiter: char, quote: char) -> Result<Vec<Record>, Pa
                     record_fields.push(std::mem::take(&mut field));
                     records.push(Record { line: record_start_line, fields: std::mem::take(&mut record_fields) });
                     line += 1;
-                    col = 0;
                     record_start_line = line;
                 }
                 other => {
@@ -132,7 +134,6 @@ fn tokenize(input: &str, delimiter: char, quote: char) -> Result<Vec<Record>, Pa
                     records.push(Record { line: record_start_line, fields: std::mem::take(&mut record_fields) });
                     state = State::FieldStart;
                     line += 1;
-                    col = 0;
                     record_start_line = line;
                 }
                 '\r' => {
@@ -143,13 +144,12 @@ fn tokenize(input: &str, delimiter: char, quote: char) -> Result<Vec<Record>, Pa
                     records.push(Record { line: record_start_line, fields: std::mem::take(&mut record_fields) });
                     state = State::FieldStart;
                     line += 1;
-                    col = 0;
                     record_start_line = line;
                 }
                 q if q == quote => {
                     return Err(ParseError {
                         line,
-                        column: col,
+                        column: record_fields.len() + 1,
                         message: "quote character is only valid at the start of a field".to_string(),
                     });
                 }
@@ -166,7 +166,6 @@ fn tokenize(input: &str, delimiter: char, quote: char) -> Result<Vec<Record>, Pa
                 } else {
                     if c == '\n' {
                         line += 1;
-                        col = 0;
                     }
                     field.push(c);
                 }
@@ -181,7 +180,6 @@ fn tokenize(input: &str, delimiter: char, quote: char) -> Result<Vec<Record>, Pa
                     records.push(Record { line: record_start_line, fields: std::mem::take(&mut record_fields) });
                     state = State::FieldStart;
                     line += 1;
-                    col = 0;
                     record_start_line = line;
                 }
                 '\r' => {
@@ -192,19 +190,17 @@ fn tokenize(input: &str, delimiter: char, quote: char) -> Result<Vec<Record>, Pa
                     records.push(Record { line: record_start_line, fields: std::mem::take(&mut record_fields) });
                     state = State::FieldStart;
                     line += 1;
-                    col = 0;
                     record_start_line = line;
                 }
                 _ => {
                     return Err(ParseError {
                         line,
-                        column: col,
+                        column: record_fields.len() + 1,
                         message: "unexpected character after closing quote".to_string(),
                     });
                 }
             },
         }
-        col += 1;
     }
 
     match state {
@@ -221,7 +217,7 @@ fn tokenize(input: &str, delimiter: char, quote: char) -> Result<Vec<Record>, Pa
         State::Quoted => {
             return Err(ParseError {
                 line,
-                column: col,
+                column: record_fields.len() + 1,
                 message: "unterminated quoted field".to_string(),
             });
         }
@@ -344,8 +340,50 @@ mod tests {
 
     #[test]
     fn rejects_unterminated_quote() {
-        let result = parse("a,b\n\"unterminated,2\n", true, ',', '"');
-        assert!(matches!(result, Err(errors) if matches!(errors[0], CsvError::Parse(_))));
+        let result = parse("a,b\n\"unterminated", true, ',', '"');
+        let errors = result.unwrap_err();
+        match &errors[0] {
+            CsvError::Parse(e) => {
+                assert_eq!(e.line, 2);
+                assert_eq!(e.column, 1);
+                assert_eq!(e.to_string(), "line 2, column 1: unterminated quoted field");
+            }
+            other => panic!("expected a parse error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reports_field_of_stray_quote_in_unquoted_field() {
+        let result = parse("a,b\n1,x\"y\n", true, ',', '"');
+        let errors = result.unwrap_err();
+        match &errors[0] {
+            CsvError::Parse(e) => {
+                assert_eq!(e.line, 2);
+                assert_eq!(e.column, 2);
+                assert_eq!(
+                    e.to_string(),
+                    "line 2, column 2: quote character is only valid at the start of a field"
+                );
+            }
+            other => panic!("expected a parse error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reports_field_of_stray_text_after_closing_quote() {
+        let result = parse("a,b\n\"x\"y,z\n", true, ',', '"');
+        let errors = result.unwrap_err();
+        match &errors[0] {
+            CsvError::Parse(e) => {
+                assert_eq!(e.line, 2);
+                assert_eq!(e.column, 1);
+                assert_eq!(
+                    e.to_string(),
+                    "line 2, column 1: unexpected character after closing quote"
+                );
+            }
+            other => panic!("expected a parse error, got {other:?}"),
+        }
     }
 
     #[test]
