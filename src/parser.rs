@@ -7,6 +7,8 @@
 //! Both `ParseError` and `ValidationError` report a 1-based `column`, so
 //! either kind of failure points at the same line/column coordinate.
 
+use std::io::Read;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParseError {
     pub line: usize,
@@ -53,6 +55,7 @@ impl std::fmt::Display for ValidationError {
 pub enum CsvError {
     Parse(ParseError),
     Ragged(ValidationError),
+    Io(String),
 }
 
 impl std::fmt::Display for CsvError {
@@ -60,6 +63,7 @@ impl std::fmt::Display for CsvError {
         match self {
             CsvError::Parse(e) => write!(f, "{e}"),
             CsvError::Ragged(e) => write!(f, "{e}"),
+            CsvError::Io(msg) => write!(f, "{msg}"),
         }
     }
 }
@@ -76,154 +80,220 @@ pub struct ParsedTable {
     pub rows: Vec<Record>,
 }
 
-/// Tokenize raw CSV text into records, honoring RFC 4180 quoting: fields
-/// may be wrapped in `quote`, a doubled quote character inside a quoted
-/// field is a literal instance of it, and quoted fields may contain the
+enum State {
+    FieldStart,
+    Unquoted,
+    Quoted,
+    /// Saw `quote` while inside `Quoted`; ambiguous until the next char
+    /// arrives (doubled quote vs. end of field).
+    QuoteSeen,
+    AfterQuote,
+}
+
+/// Tokenizes CSV one char at a time, honoring RFC 4180 quoting: fields may
+/// be wrapped in `quote`, a doubled quote character inside a quoted field
+/// is a literal instance of it, and quoted fields may contain the
 /// delimiter and newlines.
-fn tokenize(input: &str, delimiter: char, quote: char) -> Result<Vec<Record>, ParseError> {
-    enum State {
-        FieldStart,
-        Unquoted,
-        Quoted,
-        AfterQuote,
+///
+/// Deciding what a quote or a `\r` means normally takes one char of
+/// lookahead, but a chunked reader can't peek past the end of the chunk
+/// it currently has. Instead of buffering the whole input to get that
+/// lookahead for free, ambiguous chars are resolved by carrying a pending
+/// flag/state into the next `push_char` call.
+struct Tokenizer {
+    delimiter: char,
+    quote: char,
+    state: State,
+    records: Vec<Record>,
+    record_fields: Vec<String>,
+    record_start_line: usize,
+    field: String,
+    line: usize,
+    just_saw_cr: bool,
+}
+
+impl Tokenizer {
+    fn new(delimiter: char, quote: char) -> Self {
+        Tokenizer {
+            delimiter,
+            quote,
+            state: State::FieldStart,
+            records: Vec::new(),
+            record_fields: Vec::new(),
+            record_start_line: 1,
+            field: String::new(),
+            line: 1,
+            just_saw_cr: false,
+        }
     }
 
-    let mut records = Vec::new();
-    let mut record_fields: Vec<String> = Vec::new();
-    let mut record_start_line = 1usize;
-    let mut field = String::new();
-    let mut state = State::FieldStart;
-    let mut line = 1usize;
+    fn end_record(&mut self) {
+        self.record_fields.push(std::mem::take(&mut self.field));
+        self.records.push(Record {
+            line: self.record_start_line,
+            fields: std::mem::take(&mut self.record_fields),
+        });
+        self.line += 1;
+        self.record_start_line = self.line;
+    }
 
-    let mut chars = input.chars().peekable();
+    fn push_char(&mut self, c: char) -> Result<(), ParseError> {
+        if self.just_saw_cr {
+            self.just_saw_cr = false;
+            if c == '\n' {
+                return Ok(());
+            }
+        }
 
-    while let Some(c) = chars.next() {
-        match state {
+        match self.state {
             State::FieldStart => match c {
-                q if q == quote => state = State::Quoted,
-                d if d == delimiter => {
-                    record_fields.push(std::mem::take(&mut field));
+                q if q == self.quote => self.state = State::Quoted,
+                d if d == self.delimiter => {
+                    self.record_fields.push(std::mem::take(&mut self.field));
                 }
-                '\n' => {
-                    record_fields.push(std::mem::take(&mut field));
-                    records.push(Record { line: record_start_line, fields: std::mem::take(&mut record_fields) });
-                    line += 1;
-                    record_start_line = line;
-                }
+                '\n' => self.end_record(),
                 '\r' => {
-                    if chars.peek() == Some(&'\n') {
-                        chars.next();
-                    }
-                    record_fields.push(std::mem::take(&mut field));
-                    records.push(Record { line: record_start_line, fields: std::mem::take(&mut record_fields) });
-                    line += 1;
-                    record_start_line = line;
+                    self.end_record();
+                    self.just_saw_cr = true;
                 }
                 other => {
-                    field.push(other);
-                    state = State::Unquoted;
+                    self.field.push(other);
+                    self.state = State::Unquoted;
                 }
             },
             State::Unquoted => match c {
-                d if d == delimiter => {
-                    record_fields.push(std::mem::take(&mut field));
-                    state = State::FieldStart;
+                d if d == self.delimiter => {
+                    self.record_fields.push(std::mem::take(&mut self.field));
+                    self.state = State::FieldStart;
                 }
                 '\n' => {
-                    record_fields.push(std::mem::take(&mut field));
-                    records.push(Record { line: record_start_line, fields: std::mem::take(&mut record_fields) });
-                    state = State::FieldStart;
-                    line += 1;
-                    record_start_line = line;
+                    self.end_record();
+                    self.state = State::FieldStart;
                 }
                 '\r' => {
-                    if chars.peek() == Some(&'\n') {
-                        chars.next();
-                    }
-                    record_fields.push(std::mem::take(&mut field));
-                    records.push(Record { line: record_start_line, fields: std::mem::take(&mut record_fields) });
-                    state = State::FieldStart;
-                    line += 1;
-                    record_start_line = line;
+                    self.end_record();
+                    self.state = State::FieldStart;
+                    self.just_saw_cr = true;
                 }
-                q if q == quote => {
+                q if q == self.quote => {
                     return Err(ParseError {
-                        line,
-                        column: record_fields.len() + 1,
+                        line: self.line,
+                        column: self.record_fields.len() + 1,
                         message: "quote character is only valid at the start of a field".to_string(),
                     });
                 }
-                other => field.push(other),
+                other => self.field.push(other),
             },
             State::Quoted => {
-                if c == quote {
-                    if chars.peek() == Some(&quote) {
-                        chars.next();
-                        field.push(quote);
-                    } else {
-                        state = State::AfterQuote;
-                    }
+                if c == self.quote {
+                    self.state = State::QuoteSeen;
                 } else {
                     if c == '\n' {
-                        line += 1;
+                        self.line += 1;
                     }
-                    field.push(c);
+                    self.field.push(c);
+                }
+            }
+            State::QuoteSeen => {
+                if c == self.quote {
+                    self.field.push(self.quote);
+                    self.state = State::Quoted;
+                } else {
+                    self.state = State::AfterQuote;
+                    return self.push_char(c);
                 }
             }
             State::AfterQuote => match c {
-                d if d == delimiter => {
-                    record_fields.push(std::mem::take(&mut field));
-                    state = State::FieldStart;
+                d if d == self.delimiter => {
+                    self.record_fields.push(std::mem::take(&mut self.field));
+                    self.state = State::FieldStart;
                 }
                 '\n' => {
-                    record_fields.push(std::mem::take(&mut field));
-                    records.push(Record { line: record_start_line, fields: std::mem::take(&mut record_fields) });
-                    state = State::FieldStart;
-                    line += 1;
-                    record_start_line = line;
+                    self.end_record();
+                    self.state = State::FieldStart;
                 }
                 '\r' => {
-                    if chars.peek() == Some(&'\n') {
-                        chars.next();
-                    }
-                    record_fields.push(std::mem::take(&mut field));
-                    records.push(Record { line: record_start_line, fields: std::mem::take(&mut record_fields) });
-                    state = State::FieldStart;
-                    line += 1;
-                    record_start_line = line;
+                    self.end_record();
+                    self.state = State::FieldStart;
+                    self.just_saw_cr = true;
                 }
                 _ => {
                     return Err(ParseError {
-                        line,
-                        column: record_fields.len() + 1,
+                        line: self.line,
+                        column: self.record_fields.len() + 1,
                         message: "unexpected character after closing quote".to_string(),
                     });
                 }
             },
         }
+
+        Ok(())
     }
 
-    match state {
-        State::FieldStart => {
-            if !record_fields.is_empty() || !field.is_empty() {
-                record_fields.push(field);
-                records.push(Record { line: record_start_line, fields: record_fields });
+    fn finish(mut self) -> Result<Vec<Record>, ParseError> {
+        match self.state {
+            State::FieldStart => {
+                if !self.record_fields.is_empty() || !self.field.is_empty() {
+                    self.record_fields.push(self.field);
+                    self.records.push(Record { line: self.record_start_line, fields: self.record_fields });
+                }
+            }
+            State::Unquoted | State::AfterQuote | State::QuoteSeen => {
+                self.record_fields.push(self.field);
+                self.records.push(Record { line: self.record_start_line, fields: self.record_fields });
+            }
+            State::Quoted => {
+                return Err(ParseError {
+                    line: self.line,
+                    column: self.record_fields.len() + 1,
+                    message: "unterminated quoted field".to_string(),
+                });
             }
         }
-        State::Unquoted | State::AfterQuote => {
-            record_fields.push(field);
-            records.push(Record { line: record_start_line, fields: record_fields });
+
+        Ok(self.records)
+    }
+}
+
+/// Reads and decodes the input in fixed-size chunks instead of loading the
+/// whole file into memory up front, so tokenizing a multi-gigabyte CSV
+/// doesn't first require a multi-gigabyte buffer to hold it in. `carry`
+/// holds at most a few leftover bytes of a UTF-8 sequence split across a
+/// chunk boundary.
+fn tokenize_reader<R: Read>(mut reader: R, delimiter: char, quote: char) -> Result<Vec<Record>, CsvError> {
+    let mut tokenizer = Tokenizer::new(delimiter, quote);
+    let mut buf = [0u8; 8192];
+    let mut carry: Vec<u8> = Vec::new();
+
+    loop {
+        let n = reader.read(&mut buf).map_err(|e| CsvError::Io(e.to_string()))?;
+        if n == 0 {
+            break;
         }
-        State::Quoted => {
-            return Err(ParseError {
-                line,
-                column: record_fields.len() + 1,
-                message: "unterminated quoted field".to_string(),
-            });
+        carry.extend_from_slice(&buf[..n]);
+
+        let consumed = match std::str::from_utf8(&carry) {
+            Ok(s) => s.len(),
+            Err(e) => {
+                if e.error_len().is_some() {
+                    return Err(CsvError::Io("input is not valid utf-8".to_string()));
+                }
+                e.valid_up_to()
+            }
+        };
+
+        let chunk = std::str::from_utf8(&carry[..consumed]).unwrap();
+        for c in chunk.chars() {
+            tokenizer.push_char(c).map_err(CsvError::Parse)?;
         }
+        carry.drain(..consumed);
     }
 
-    Ok(records)
+    if !carry.is_empty() {
+        return Err(CsvError::Io("input is not valid utf-8".to_string()));
+    }
+
+    tokenizer.finish().map_err(CsvError::Parse)
 }
 
 /// Parse and structurally validate CSV text. Every record must have the
@@ -241,8 +311,23 @@ pub fn parse(
     delimiter: char,
     quote: char,
 ) -> Result<ParsedTable, Vec<CsvError>> {
-    let records = tokenize(input, delimiter, quote).map_err(|e| vec![CsvError::Parse(e)])?;
+    parse_reader(input.as_bytes(), has_header, delimiter, quote)
+}
 
+/// Same as [`parse`], but reads from any `Read` implementation (a file, a
+/// socket, stdin) instead of requiring the caller to have already buffered
+/// the whole input into a string.
+pub fn parse_reader<R: Read>(
+    reader: R,
+    has_header: bool,
+    delimiter: char,
+    quote: char,
+) -> Result<ParsedTable, Vec<CsvError>> {
+    let records = tokenize_reader(reader, delimiter, quote).map_err(|e| vec![e])?;
+    validate(records, has_header)
+}
+
+fn validate(records: Vec<Record>, has_header: bool) -> Result<ParsedTable, Vec<CsvError>> {
     if records.is_empty() {
         return Ok(ParsedTable { header: None, rows: Vec::new() });
     }

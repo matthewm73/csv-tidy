@@ -116,14 +116,14 @@ fn print_help() {
     println!("    -h, --help          show this help text");
 }
 
-fn read_input(path: &Option<String>) -> io::Result<String> {
+/// Opens the input as a raw byte stream rather than reading it fully into
+/// a `String` up front, so `parser::parse_reader` can tokenize it in
+/// bounded-memory chunks instead of needing the whole file resident twice
+/// (once as the raw buffer, once as the parsed fields).
+fn open_input(path: &Option<String>) -> io::Result<Box<dyn Read>> {
     match path.as_deref() {
-        None | Some("-") => {
-            let mut buf = String::new();
-            io::stdin().read_to_string(&mut buf)?;
-            Ok(buf)
-        }
-        Some(p) => fs::read_to_string(p),
+        None | Some("-") => Ok(Box::new(io::stdin())),
+        Some(p) => Ok(Box::new(fs::File::open(p)?)),
     }
 }
 
@@ -138,15 +138,15 @@ fn main() -> ExitCode {
         }
     };
 
-    let input = match read_input(&args.path) {
-        Ok(s) => s,
+    let reader = match open_input(&args.path) {
+        Ok(r) => r,
         Err(e) => {
             eprintln!("csvtidy: could not read input: {e}");
             return ExitCode::from(1);
         }
     };
 
-    match parser::parse(&input, args.has_header, args.delimiter, args.quote) {
+    match parser::parse_reader(reader, args.has_header, args.delimiter, args.quote) {
         Ok(table) => {
             if let Some(dest) = &args.write {
                 let serialized = writer::write_csv(&table, args.delimiter, args.quote);
